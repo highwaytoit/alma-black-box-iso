@@ -24,6 +24,26 @@ on:
         required: true
         default: false
         type: boolean
+      efi_size_mib:
+        description: EFI partition size in MiB
+        required: true
+        default: 512
+        type: number
+      boot_size_mib:
+        description: /boot partition size in MiB
+        required: true
+        default: 1024
+        type: number
+      root_size_mib:
+        description: Root size in MiB (minimum when grow is ON)
+        required: true
+        default: 8192
+        type: number
+      grow_root:
+        description: Grow root to use remaining disk space
+        required: true
+        default: true
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -46,12 +66,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Validate access options
+      - name: Validate installer options
         shell: bash
         env:
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
+          BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
+          ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
         run: |
           set -euo pipefail
 
@@ -66,6 +89,18 @@ jobs:
             echo 'Add the public key under Settings -> Secrets and variables -> Actions, then run the workflow again.'
             exit 1
           fi
+
+          for entry in \
+            "EFI partition:${EFI_SIZE_MIB}" \
+            "/boot partition:${BOOT_SIZE_MIB}" \
+            "root partition:${ROOT_SIZE_MIB}"; do
+            label="${entry%%:*}"
+            value="${entry#*:}"
+            if [[ ! "${value}" =~ ^[0-9]+$ || "${value}" -le 0 ]]; then
+              echo "ERROR: ${label} size must be a positive whole number of MiB. Received: ${value}"
+              exit 1
+            fi
+          done
 
       - name: Maximize build space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
@@ -84,12 +119,16 @@ jobs:
         with:
           cosign-release: 'v3.1.2'
 
-      - name: Prepare installer access configuration
+      - name: Prepare installer runtime configuration
         shell: bash
         env:
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
+          BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
+          ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
+          GROW_ROOT: ${{ inputs.grow_root }}
         run: |
           set -euo pipefail
 
@@ -132,9 +171,19 @@ jobs:
           text = path.read_text()
 
           user_pattern = re.compile(r'^user --name=bbox --groups=wheel(?: .*)?$', re.MULTILINE)
-          matches = user_pattern.findall(text)
-          if len(matches) != 1:
-              raise SystemExit("ERROR: installer/iso.toml must contain exactly one bbox user line")
+          efi_pattern = re.compile(r'^part /boot/efi --fstype=efi --size=\d+$', re.MULTILINE)
+          boot_pattern = re.compile(r'^part /boot --fstype=xfs --size=\d+$', re.MULTILINE)
+          root_pattern = re.compile(r'^part / --fstype=xfs(?: --grow)? --size=\d+$', re.MULTILINE)
+
+          checks = {
+              "bbox user": user_pattern,
+              "EFI partition": efi_pattern,
+              "/boot partition": boot_pattern,
+              "root partition": root_pattern,
+          }
+          for label, pattern in checks.items():
+              if len(pattern.findall(text)) != 1:
+                  raise SystemExit(f"ERROR: installer/iso.toml must contain exactly one supported {label} line")
 
           default_password_hash = "$6$BZqInxNMN2BtLMOO$6UQrru8JMxnH5ls4X4IwYARw1xDXyUjeil85ZTwqXErenaG0vWLt6Tat6WDXuPLozTGQ84oWYPvaahzJTeEpq."
           password_enabled = os.environ["ENABLE_PASSWORD_LOGIN"] == "true"
@@ -161,10 +210,28 @@ jobs:
                   1,
               )
 
+          efi_size = int(os.environ["EFI_SIZE_MIB"])
+          boot_size = int(os.environ["BOOT_SIZE_MIB"])
+          root_size = int(os.environ["ROOT_SIZE_MIB"])
+          grow_root = os.environ["GROW_ROOT"] == "true"
+
+          text = efi_pattern.sub(
+              f"part /boot/efi --fstype=efi --size={efi_size}",
+              text,
+              count=1,
+          )
+          text = boot_pattern.sub(
+              f"part /boot --fstype=xfs --size={boot_size}",
+              text,
+              count=1,
+          )
+          root_line = f"part / --fstype=xfs {'--grow ' if grow_root else ''}--size={root_size}"
+          text = root_pattern.sub(root_line, text, count=1)
+
           path.write_text(text)
           PY
 
-          echo 'Installer access configuration prepared successfully.'
+          echo 'Installer runtime configuration prepared successfully.'
 
       - name: Resolve selected bootc image
         id: source
@@ -296,6 +363,10 @@ jobs:
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
+          EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
+          BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
+          ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
+          GROW_ROOT: ${{ inputs.grow_root }}
         run: |
           if [[ "${ENABLE_PASSWORD_LOGIN}" == "true" ]]; then
             password_status='enabled (bbox / bbox)'
@@ -307,6 +378,12 @@ jobs:
             ssh_status='installed for bbox'
           else
             ssh_status='not installed'
+          fi
+
+          if [[ "${GROW_ROOT}" == "true" ]]; then
+            root_status="minimum ${ROOT_SIZE_MIB} MiB, grows to use remaining disk space"
+          else
+            root_status="${ROOT_SIZE_MIB} MiB, does not grow; remaining disk space is left unallocated"
           fi
 
           {
@@ -326,9 +403,9 @@ jobs:
             echo '- Installer type: bootc-installer with embedded Anaconda/Lorax environment'
             echo '- Firmware target: UEFI x86_64'
             echo '- Partition table: GPT'
-            echo '- EFI system partition: 512 MiB'
-            echo '- /boot: 1 GiB XFS'
-            echo '- /: XFS using remaining disk space (8 GiB minimum)'
+            echo "- EFI system partition: ${EFI_SIZE_MIB} MiB"
+            echo "- /boot: ${BOOT_SIZE_MIB} MiB XFS"
+            echo "- /: XFS, ${root_status}"
             echo '- Swap: none'
             echo
             echo '> **DANGER:** Disconnect every non-target disk before using this unattended installer on physical hardware.'
