@@ -14,6 +14,16 @@ on:
         required: true
         default: true
         type: boolean
+      enable_password_login:
+        description: Enable bbox password login (default password bbox)
+        required: true
+        default: true
+        type: boolean
+      install_ssh_key:
+        description: Install SSH public key from SSH_PUBLIC_KEY secret
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -36,6 +46,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Validate access options
+        shell: bash
+        env:
+          ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
+          INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${ENABLE_PASSWORD_LOGIN}" != "true" && "${INSTALL_SSH_KEY}" != "true" ]]; then
+            echo 'ERROR: The installer would create no usable login method.'
+            echo 'Enable bbox password login, install an SSH public key, or enable both.'
+            exit 1
+          fi
+
+          if [[ "${INSTALL_SSH_KEY}" == "true" && -z "${SSH_PUBLIC_KEY:-}" ]]; then
+            echo 'ERROR: Install SSH public key is enabled, but repository secret SSH_PUBLIC_KEY is missing or empty.'
+            echo 'Add the public key under Settings -> Secrets and variables -> Actions, then run the workflow again.'
+            exit 1
+          fi
+
       - name: Maximize build space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
         with:
@@ -46,12 +77,83 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq skopeo
+          sudo apt-get install -y jq skopeo openssh-client
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: 'v3.1.2'
+
+      - name: Prepare installer access configuration
+        shell: bash
+        env:
+          ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
+          INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+
+          runtime_config="${PWD}/installer/runtime-iso.toml"
+          cp installer/iso.toml "${runtime_config}"
+
+          normalized_key=''
+          if [[ "${INSTALL_SSH_KEY}" == "true" ]]; then
+            key_file="${RUNNER_TEMP}/bbox-ssh-key.pub"
+            printf '%s\n' "${SSH_PUBLIC_KEY}" > "${key_file}"
+
+            # Validate the supplied OpenSSH public key before starting the long build.
+            ssh-keygen -l -f "${key_file}" >/dev/null
+
+            read -r key_type key_data _ < "${key_file}"
+            if [[ -z "${key_type:-}" || -z "${key_data:-}" ]]; then
+              echo 'ERROR: SSH_PUBLIC_KEY is not a complete OpenSSH public key.'
+              exit 1
+            fi
+            normalized_key="${key_type} ${key_data}"
+          fi
+
+          export RUNTIME_CONFIG="${runtime_config}"
+          export NORMALIZED_SSH_PUBLIC_KEY="${normalized_key}"
+
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path(os.environ["RUNTIME_CONFIG"])
+          text = path.read_text()
+
+          user_pattern = re.compile(r'^user --name=bbox --groups=wheel(?: .*)?$', re.MULTILINE)
+          matches = user_pattern.findall(text)
+          if len(matches) != 1:
+              raise SystemExit("ERROR: installer/iso.toml must contain exactly one bbox user line")
+
+          password_hash = "$6$BZqInxNMN2BtLMOO$6UQrru8JMxnH5ls4X4IwYARw1xDXyUjeil85ZTwqXErenaG0vWLt6Tat6WDXuPLozTGQ84oWYPvaahzJTeEpq."
+          password_enabled = os.environ["ENABLE_PASSWORD_LOGIN"] == "true"
+          ssh_enabled = os.environ["INSTALL_SSH_KEY"] == "true"
+
+          if password_enabled:
+              user_line = f"user --name=bbox --groups=wheel --password={password_hash} --iscrypted"
+          else:
+              user_line = "user --name=bbox --groups=wheel --lock"
+
+          text = user_pattern.sub(user_line, text, count=1)
+          text = re.sub(r'^sshkey --username=bbox .*\n?', '', text, flags=re.MULTILINE)
+
+          if ssh_enabled:
+              key = os.environ["NORMALIZED_SSH_PUBLIC_KEY"]
+              if not key:
+                  raise SystemExit("ERROR: normalized SSH public key is empty")
+              text = text.replace(
+                  user_line,
+                  f'{user_line}\nsshkey --username=bbox "{key}"',
+                  1,
+              )
+
+          path.write_text(text)
+          PY
+
+          echo 'Installer access configuration prepared successfully.'
 
       - name: Resolve selected bootc image
         id: source
@@ -139,7 +241,7 @@ jobs:
             --security-opt label=type:unconfined_t \
             --volume /var/lib/containers/storage:/var/lib/containers/storage \
             --volume "${PWD}/output:/output" \
-            --volume "${PWD}/installer/iso.toml:/config.toml:ro" \
+            --volume "${PWD}/installer/runtime-iso.toml:/config.toml:ro" \
             "${BIB_IMAGE}" build \
             --output /output \
             --type bootc-installer \
@@ -181,7 +283,21 @@ jobs:
           SOURCE_NAME: ${{ steps.source.outputs.name }}
           SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
+          INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
         run: |
+          if [[ "${ENABLE_PASSWORD_LOGIN}" == "true" ]]; then
+            password_status='enabled (bbox / bbox)'
+          else
+            password_status='locked'
+          fi
+
+          if [[ "${INSTALL_SSH_KEY}" == "true" ]]; then
+            ssh_status='installed for bbox'
+          else
+            ssh_status='not installed'
+          fi
+
           {
             echo '## Alma Black Box installer ISO'
             echo
@@ -192,6 +308,10 @@ jobs:
             echo "- Source image: ${SOURCE_NAME}"
             echo "- Resolved digest: ${SOURCE_DIGEST}"
             echo "- Signature verification: ${{ inputs.verify_signature }}"
+            echo "- bbox password login: ${password_status}"
+            echo "- SSH public key: ${ssh_status}"
+            echo '- bbox groups: wheel'
+            echo '- Root login: locked'
             echo '- Installer type: bootc-installer with embedded Anaconda/Lorax environment'
             echo '- Firmware target: UEFI x86_64'
             echo '- Partition table: GPT'
@@ -199,7 +319,6 @@ jobs:
             echo '- /boot: 1 GiB XFS'
             echo '- /: XFS using remaining disk space (8 GiB minimum)'
             echo '- Swap: none'
-            echo '- Temporary administrator: bbox / bbox'
             echo
             echo '> **DANGER:** Disconnect every non-target disk before using this unattended installer on physical hardware.'
           } >> "${GITHUB_STEP_SUMMARY}"
