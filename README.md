@@ -13,14 +13,116 @@ This repository is intended to be used as a **GitHub template**. It is an ISO fa
 2. Open **Actions** in your new repository.
 3. Select **Build Alma Black Box installer ISO**.
 4. Click **Run workflow**.
-5. Leave the default bootc image unchanged unless you intentionally want to install another image.
-6. Wait for the workflow to finish successfully.
-7. Open the completed workflow run. The **Summary** contains a **Download installer artifact** link.
-8. Download `alma-black-box-installer`, extract the ZIP, and use `alma-black-box-installer.iso`.
+5. Choose the installer access options described below.
+6. Leave the default bootc image unchanged unless you intentionally want to install another image.
+7. Wait for the workflow to finish successfully.
+8. Open the completed workflow run. The **Summary** contains a **Download installer artifact** link.
+9. Download `alma-black-box-installer`, extract the ZIP, and use `alma-black-box-installer.iso`.
 
 The artifact also contains `SHA256SUMS`.
 
 Artifacts are intentionally retained for only **1 day**. This repository is a builder, not an ISO archive. If the artifact expires, simply run the workflow again.
+
+## Installer access options
+
+Every ISO keeps the local administrator account:
+
+```text
+username: bbox
+groups:   wheel
+```
+
+Root login remains locked.
+
+The **Run workflow** screen provides two access toggles:
+
+- **Enable bbox password login** — default: ON
+- **Install SSH public key from SSH_PUBLIC_KEY secret** — default: OFF
+
+This gives three supported modes:
+
+| Password login | SSH key | Result |
+| --- | --- | --- |
+| ON | OFF | Default `bbox / bbox` login |
+| ON | ON | `bbox / bbox` plus SSH public-key login |
+| OFF | ON | SSH-key-only login for `bbox`; the password is locked |
+
+The workflow rejects **OFF / OFF** immediately so it cannot spend hours building an ISO with no usable login method.
+
+### Default password mode
+
+With **Enable bbox password login** ON, the temporary credentials are:
+
+```text
+username: bbox
+password: bbox
+```
+
+The password stored in the installer configuration is a one-way hash, not plaintext.
+
+Change the password immediately after the first successful boot:
+
+```bash
+passwd
+```
+
+Do not put your real password into a public template repository or workflow file.
+
+### SSH public-key login
+
+Only the **public** SSH key is placed into GitHub. Your private SSH key stays on your computer and must never be committed to the repository or stored in this template.
+
+If you already have an SSH key you want to use, copy its `.pub` contents.
+
+To create a dedicated Ed25519 key on Linux or macOS:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/bbox_ed25519 -C "bbox"
+```
+
+This creates:
+
+```text
+~/.ssh/bbox_ed25519      private key - keep this private
+~/.ssh/bbox_ed25519.pub  public key  - put this in GitHub
+```
+
+Show the public key with:
+
+```bash
+cat ~/.ssh/bbox_ed25519.pub
+```
+
+In the repository you created from this template:
+
+1. Open **Settings**.
+2. Open **Secrets and variables** -> **Actions**.
+3. Click **New repository secret**.
+4. Name it exactly:
+
+   ```text
+   SSH_PUBLIC_KEY
+   ```
+
+5. Paste the complete public key, for example `ssh-ed25519 AAAA... bbox`.
+6. Save the secret.
+7. Run the ISO workflow and enable **Install SSH public key from SSH_PUBLIC_KEY secret**.
+
+The workflow validates the key before starting the long ISO build. If the toggle is enabled but the secret is missing or malformed, the workflow fails immediately.
+
+The generated installer adds the key to the `bbox` account using Kickstart's native `sshkey` support.
+
+### SSH-key-only mode
+
+For SSH-key-only access:
+
+- turn **Enable bbox password login** OFF;
+- turn **Install SSH public key from SSH_PUBLIC_KEY secret** ON.
+
+The `bbox` user still exists and remains in `wheel`, but its local password is locked. SSH public-key authentication remains available through the injected key.
+
+> [!NOTE]
+> A locked password also means you cannot initially sign in to Cockpit with `bbox` using a password. If you later want normal Cockpit password login, SSH into the machine first and set a local password with `sudo passwd bbox`.
 
 ## Default installation image
 
@@ -73,7 +175,7 @@ For physical hardware, the safest procedure is:
 
 ## Default partition layout
 
-The partitioning and account configuration live in:
+The partitioning and base account configuration live in:
 
 ```text
 installer/iso.toml
@@ -90,52 +192,31 @@ The default layout is:
 
 The disk is initialized as GPT.
 
-You may edit `installer/iso.toml` before running the workflow if your machine needs a different partition layout, timezone, hostname, network behavior, or local account.
-
-## Default account
-
-The supplied installer creates this temporary administrator:
-
-```text
-username: bbox
-password: bbox
-```
-
-The account is a member of `wheel`. Root is locked.
-
-The public temporary password is intentional: **do not put your real password into a public template repository or workflow file.** Change it locally immediately after the first successful boot.
-
-After logging in as `bbox`, run:
-
-```bash
-passwd
-```
-
-Enter `bbox` once as the current password, then enter your new private password twice.
-
-If you change the username in `installer/iso.toml`, use that account instead.
+You may edit `installer/iso.toml` before running the workflow if your machine needs a different partition layout, timezone, hostname, network behavior, or local account. The workflow makes a temporary runtime copy of this file and applies the selected password/SSH options only to that copy; it does not rewrite the committed `installer/iso.toml`.
 
 ## What the workflow does
 
 A manual build performs these steps:
 
-1. Resolve the selected bootc image tag to its current amd64 digest.
-2. Verify the exact digest with Cosign when signature verification is enabled.
-3. Build a disposable AlmaLinux installer container containing Anaconda, Lorax, GRUB and EFI tooling.
-4. Pull the verified bootc payload and `bootc-image-builder`.
-5. Build a `bootc-installer` ISO using the Kickstart embedded in `installer/iso.toml`.
-6. Create `alma-black-box-installer.iso` and `SHA256SUMS`.
-7. Upload them as a short-lived GitHub Actions artifact.
-8. Put the direct artifact download link in the workflow Summary.
+1. Validate the selected login options and, when requested, the `SSH_PUBLIC_KEY` secret.
+2. Generate a temporary installer configuration with the selected password/SSH mode.
+3. Resolve the selected bootc image tag to its current amd64 digest.
+4. Verify the exact digest with Cosign when signature verification is enabled.
+5. Build a disposable AlmaLinux installer container containing Anaconda, Lorax, GRUB and EFI tooling.
+6. Pull the verified bootc payload and `bootc-image-builder`.
+7. Build a `bootc-installer` ISO using the Kickstart from the temporary installer configuration.
+8. Create `alma-black-box-installer.iso` and `SHA256SUMS`.
+9. Upload them as a short-lived GitHub Actions artifact.
+10. Put the direct artifact download link and selected access mode in the workflow Summary.
 
 The Anaconda/Lorax packages used to construct the ISO are **installer-only**. They are not added to the Alma Black Box production image being installed.
 
 ## Repository layout
 
 ```text
-.github/workflows/build-installer.yml  Manual ISO build workflow
+.github/workflows/build-installer.yml  Manual ISO build workflow and access-mode generation
 installer/Containerfile                Disposable AlmaLinux installer environment
-installer/iso.toml                     Kickstart, partition layout and temporary account
+installer/iso.toml                     Base Kickstart and partition layout
 cosign.pub                              Alma Black Box image verification key
 ```
 
