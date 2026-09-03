@@ -13,7 +13,7 @@ This repository is intended to be used as a **GitHub template**. It is an ISO fa
 2. Open **Actions** in your new repository.
 3. Select **Build Alma Black Box installer ISO**.
 4. Click **Run workflow**.
-5. Choose the installer access options described below.
+5. Choose the installer access and partition options described below.
 6. Leave the default bootc image unchanged unless you intentionally want to install another image.
 7. Wait for the workflow to finish successfully.
 8. Open the completed workflow run. The **Summary** contains a **Download installer artifact** link.
@@ -124,6 +124,33 @@ The `bbox` user still exists and remains in `wheel`. Instead of locking the acco
 > [!NOTE]
 > In SSH-key-only mode you cannot initially sign in to Cockpit with `bbox` using a password. If you later want normal Cockpit password login, SSH into the machine first and set a local password with `sudo passwd bbox`.
 
+## Partition options
+
+The **Run workflow** screen also exposes the basic partition sizes used by the unattended installer:
+
+- **EFI partition size in MiB** — default: `512`
+- **/boot partition size in MiB** — default: `1024`
+- **Root size in MiB** — default: `8192`
+- **Grow root to use remaining disk space** — default: ON
+
+The values are in **MiB**.
+
+### Root growth toggle
+
+> [!NOTE]
+> With **Grow root to use remaining disk space** ON, the root-size value is a **minimum**. The root partition starts at that size and then grows to use all remaining disk space.
+>
+> With **Grow root to use remaining disk space** OFF, the root-size value becomes the **fixed root partition size**. Any disk space left after EFI, `/boot`, and `/` remains unallocated.
+
+Examples:
+
+- Default: EFI `512`, `/boot` `1024`, root `8192`, grow ON -> root uses the rest of the disk.
+- Fixed 100 GiB root: root `102400`, grow OFF -> `/` is about 100 GiB and the remaining disk space stays unallocated.
+
+The workflow validates that all three partition sizes are positive whole numbers before the long ISO build starts.
+
+These controls are intentionally limited to the common layout. Advanced users who need a different filesystem, LVM, a separate `/var`, or another partition scheme can edit `installer/iso.toml` directly before running the workflow.
+
 ## Default installation image
 
 The default workflow input is:
@@ -181,7 +208,7 @@ The partitioning and base account configuration live in:
 installer/iso.toml
 ```
 
-The default layout is:
+The committed defaults are:
 
 | Mount point | Filesystem | Size |
 | --- | --- | --- |
@@ -192,14 +219,14 @@ The default layout is:
 
 The disk is initialized as GPT.
 
-You may edit `installer/iso.toml` before running the workflow if your machine needs a different partition layout, timezone, hostname, network behavior, or local account. The workflow makes a temporary runtime copy of this file and applies the selected password/SSH options only to that copy; it does not rewrite the committed `installer/iso.toml`.
+The workflow makes a temporary `installer/runtime-iso.toml` for each build and applies the selected password, SSH, and partition settings only to that runtime copy. It does not rewrite the committed `installer/iso.toml`.
 
 ## What the workflow does
 
 A manual build performs these steps:
 
-1. Validate the selected login options and, when requested, the `SSH_PUBLIC_KEY` secret.
-2. Generate a temporary installer configuration with the selected password/SSH mode.
+1. Validate the selected login and partition options and, when requested, the `SSH_PUBLIC_KEY` secret.
+2. Generate a temporary installer configuration with the selected password, SSH, and partition settings.
 3. Resolve the selected bootc image tag to its current amd64 digest.
 4. Verify the exact digest with Cosign when signature verification is enabled.
 5. Build a disposable AlmaLinux installer container containing Anaconda, Lorax, GRUB and EFI tooling.
@@ -207,16 +234,16 @@ A manual build performs these steps:
 7. Build a `bootc-installer` ISO using the Kickstart from the temporary installer configuration.
 8. Create `alma-black-box-installer.iso` and `SHA256SUMS`.
 9. Upload them as a short-lived GitHub Actions artifact.
-10. Put the direct artifact download link and selected access mode in the workflow Summary.
+10. Put the direct artifact download link and selected installer settings in the workflow Summary.
 
 The Anaconda/Lorax packages used to construct the ISO are **installer-only**. They are not added to the Alma Black Box production image being installed.
 
 ## Repository layout
 
 ```text
-.github/workflows/build-installer.yml  Manual ISO build workflow and access-mode generation
+.github/workflows/build-installer.yml  Manual ISO build workflow and runtime customization
 installer/Containerfile                Disposable AlmaLinux installer environment
-installer/iso.toml                     Base Kickstart and partition layout
+installer/iso.toml                     Base Kickstart and default partition layout
 cosign.pub                              Alma Black Box image verification key
 ```
 
