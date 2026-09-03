@@ -1,0 +1,26 @@
+name = "alma-black-box-installer"
+description = "Unattended UEFI installer for Alma Black Box"
+version = "1"
+
+# DANGER: this installer is intentionally destructive.
+# For physical hardware, disconnect every non-target disk before booting it.
+# For a VM, present one blank target disk.
+[customizations.installer.kickstart]
+contents = """
+text --non-interactive
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts=us
+timezone America/Toronto --utc
+network --bootproto=dhcp --device=link --activate --onboot=on --hostname=alma-black-box
+
+zerombr
+clearpart --all --initlabel --disklabel=gpt
+part /boot/efi --fstype=efi --size=512
+part /boot --fstype=xfs --size=1024
+part / --fstype=xfs --grow --size=8192
+
+rootpw --lock --iscrypted $6$BZqInxNMN2BtLMOO$6UQrru8JMxnH5ls4X4IwYARw1xDXyUjeil85ZTwqXErenaG0vWLt6Tat6WDXuPLozTGQ84oWYPvaahzJTeEpq.
+user --name=bbox --groups=wheel --password=$6$BZqInxNMN2BtLMOO$6UQrru8JMxnH5ls4X4IwYARw1xDXyUjeil85ZTwqXErenaG0vWLt6Tat6WDXuPLozTGQ84oWYPvaahzJTeEpq. --iscrypted
+
+reboot --eject
+"""
