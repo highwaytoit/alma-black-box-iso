@@ -45,7 +45,7 @@ This gives three supported modes:
 | --- | --- | --- |
 | ON | OFF | Default `bbox / bbox` login |
 | ON | ON | `bbox / bbox` plus SSH public-key login |
-| OFF | ON | SSH-key-only login for `bbox`; the password is locked |
+| OFF | ON | SSH-key-only login for `bbox`; no usable password is created |
 
 The workflow rejects **OFF / OFF** immediately so it cannot spend hours building an ISO with no usable login method.
 
@@ -119,10 +119,10 @@ For SSH-key-only access:
 - turn **Enable bbox password login** OFF;
 - turn **Install SSH public key from SSH_PUBLIC_KEY secret** ON.
 
-The `bbox` user still exists and remains in `wheel`, but its local password is locked. SSH public-key authentication remains available through the injected key.
+The `bbox` user still exists and remains in `wheel`. Instead of locking the account, the workflow generates a fresh random password that is never shown or saved anywhere outside the temporary build. This leaves the account usable for SSH public-key authentication while making password login unavailable in practice.
 
 > [!NOTE]
-> A locked password also means you cannot initially sign in to Cockpit with `bbox` using a password. If you later want normal Cockpit password login, SSH into the machine first and set a local password with `sudo passwd bbox`.
+> In SSH-key-only mode you cannot initially sign in to Cockpit with `bbox` using a password. If you later want normal Cockpit password login, SSH into the machine first and set a local password with `sudo passwd bbox`.
 
 ## Default installation image
 
