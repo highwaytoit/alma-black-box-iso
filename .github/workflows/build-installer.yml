@@ -1,0 +1,205 @@
+---
+name: Build Alma Black Box installer ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootc_image:
+        description: Bootc image to install
+        required: true
+        default: ghcr.io/highwaytoit/alma-black-box:10
+        type: string
+      verify_signature:
+        description: Verify the selected image with cosign.pub
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest
+  INSTALLER_IMAGE: localhost/alma-black-box-installer:10
+
+jobs:
+  build-installer:
+    name: Build unattended UEFI installer
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Maximize build space
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+        with:
+          remove-codeql: true
+
+      - name: Install verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq skopeo
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.2'
+
+      - name: Resolve selected bootc image
+        id: source
+        shell: bash
+        env:
+          BOOTC_IMAGE: ${{ inputs.bootc_image }}
+          VERIFY_SIGNATURE: ${{ inputs.verify_signature }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BOOTC_IMAGE}" ]]; then
+            echo 'bootc_image cannot be empty.'
+            exit 1
+          fi
+
+          inspect="$(skopeo inspect \
+            --override-arch amd64 \
+            "docker://${BOOTC_IMAGE}")"
+
+          name="$(jq -r '.Name' <<<"${inspect}")"
+          digest="$(jq -r '.Digest' <<<"${inspect}")"
+
+          [[ -n "${name}" && "${name}" != "null" ]]
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          ref="${name}@${digest}"
+
+          if [[ "${VERIFY_SIGNATURE}" == "true" ]]; then
+            cosign verify \
+              --new-bundle-format=false \
+              --key cosign.pub \
+              "${ref}" >/tmp/bootc-image-verify.json
+            jq -e 'length > 0' /tmp/bootc-image-verify.json >/dev/null
+            echo "Verified installer payload: ${ref}"
+          else
+            echo "WARNING: signature verification disabled for ${ref}"
+          fi
+
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare rootful Podman storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /var/lib/containers/storage
+          sudo mkdir -p /etc/containers
+          sudo tee /etc/containers/storage.conf >/dev/null <<'EOF'
+          [storage]
+          driver = "overlay"
+          runroot = "/run/containers/storage"
+          graphroot = "/var/lib/containers/storage"
+          EOF
+
+      - name: Build dedicated installer container
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo podman build \
+            --pull=always \
+            --file installer/Containerfile \
+            --tag "${INSTALLER_IMAGE}" \
+            .
+
+      - name: Pull payload and image builder
+        shell: bash
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+          sudo podman pull "${SOURCE_REF}"
+          sudo podman pull "${BIB_IMAGE}"
+
+      - name: Build bootc installer ISO
+        shell: bash
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          sudo podman run --rm \
+            --privileged \
+            --security-opt label=type:unconfined_t \
+            --volume /var/lib/containers/storage:/var/lib/containers/storage \
+            --volume "${PWD}/output:/output" \
+            --volume "${PWD}/installer/iso.toml:/config.toml:ro" \
+            "${BIB_IMAGE}" build \
+            --output /output \
+            --type bootc-installer \
+            --installer-payload-ref "${SOURCE_REF}" \
+            "${INSTALLER_IMAGE}"
+
+      - name: Prepare downloadable ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          iso_path="$(find ./output -type f -name '*.iso' -print -quit)"
+          if [[ -z "${iso_path}" || ! -f "${iso_path}" ]]; then
+            echo 'Installer ISO was not produced.'
+            exit 1
+          fi
+
+          mkdir -p installer-artifact
+          cp "${iso_path}" installer-artifact/alma-black-box-installer.iso
+          (
+            cd installer-artifact
+            sha256sum alma-black-box-installer.iso > SHA256SUMS
+          )
+
+      - name: Upload installer ISO
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alma-black-box-installer
+          path: installer-artifact/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+      - name: Installer summary
+        shell: bash
+        env:
+          SOURCE_NAME: ${{ steps.source.outputs.name }}
+          SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          {
+            echo '## Alma Black Box installer ISO'
+            echo
+            echo "### [Download installer artifact](${ARTIFACT_URL})"
+            echo
+            echo '> The artifact expires after 1 day. Run this workflow again if it has expired.'
+            echo
+            echo "- Source image: ${SOURCE_NAME}"
+            echo "- Resolved digest: ${SOURCE_DIGEST}"
+            echo "- Signature verification: ${{ inputs.verify_signature }}"
+            echo '- Installer type: bootc-installer with embedded Anaconda/Lorax environment'
+            echo '- Firmware target: UEFI x86_64'
+            echo '- Partition table: GPT'
+            echo '- EFI system partition: 512 MiB'
+            echo '- /boot: 1 GiB XFS'
+            echo '- /: XFS using remaining disk space (8 GiB minimum)'
+            echo '- Swap: none'
+            echo '- Temporary administrator: bbox / bbox'
+            echo
+            echo '> **DANGER:** Disconnect every non-target disk before using this unattended installer on physical hardware.'
+          } >> "${GITHUB_STEP_SUMMARY}"
