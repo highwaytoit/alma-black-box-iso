@@ -27,18 +27,18 @@ on:
       efi_size_mib:
         description: EFI partition size in MiB
         required: true
-        default: 512
-        type: number
+        default: '512'
+        type: string
       boot_size_mib:
         description: /boot partition size in MiB
         required: true
-        default: 1024
-        type: number
+        default: '1024'
+        type: string
       root_size_mib:
         description: Root size in MiB (minimum when grow is ON)
         required: true
-        default: 8192
-        type: number
+        default: '8192'
+        type: string
       grow_root:
         description: Grow root to use remaining disk space
         required: true
