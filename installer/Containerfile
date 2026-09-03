@@ -1,0 +1,43 @@
+ARG ALMA_BOOTC_IMAGE=quay.io/almalinuxorg/almalinux-bootc:10
+FROM ${ALMA_BOOTC_IMAGE}
+
+LABEL org.opencontainers.image.title="Alma Black Box bootc installer environment" \
+      org.opencontainers.image.description="Disposable AlmaLinux bootc container used only to build an Alma Black Box installer ISO"
+
+# bootc-installer uses this container as the Anaconda/Lorax environment.
+# These packages are installer-only and are not added to the production image.
+RUN dnf install -y \
+    anaconda \
+    anaconda-install-env-deps \
+    anaconda-dracut \
+    dracut-config-generic \
+    dracut-network \
+    net-tools \
+    squashfs-tools \
+    shim-x64 \
+    grub2-common \
+    grub2-efi-x64 \
+    grub2-efi-x64-cdboot \
+    python3-mako \
+    lorax-templates-* \
+    biosdevname \
+    prefixdevname \
+    && dnf clean all
+
+# bootc images can record EFI packages as installed while omitting ordinary
+# /boot payload files. Reinstall them so osbuild gets the EFI files it needs.
+RUN dnf reinstall -y \
+    shim-x64 \
+    grub2-common \
+    grub2-efi-x64 \
+    grub2-efi-x64-cdboot \
+    && dnf clean all
+
+# Fail early if anything required by org.osbuild.grub2.iso is missing.
+RUN test -f /boot/efi/EFI/almalinux/shimx64.efi \
+    && test -f /boot/efi/EFI/almalinux/mmx64.efi \
+    && test -f /boot/efi/EFI/almalinux/gcdx64.efi \
+    && test -f /usr/share/grub/unicode.pf2
+
+# Lorax creates links below /mnt while bootc systems use /var/mnt.
+RUN mkdir -p /var/mnt
