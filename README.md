@@ -34,6 +34,17 @@ The workflow resolves that moving tag to an immutable digest at build time and u
 
 The default Alma Black Box image is verified with the included `cosign.pub` before the ISO is built.
 
+### About `cosign.pub`
+
+> [!IMPORTANT]
+> **Do not remove or replace `cosign.pub` when building the default Alma Black Box ISO.**
+>
+> The ISO Builder uses this public key to verify that `ghcr.io/highwaytoit/alma-black-box:10` was signed by the Alma Black Box project before that image is included in the installer ISO.
+>
+> This is a public verification key only. It cannot be used to sign images and does not expose the private signing key.
+>
+> If you use the default Alma Black Box image, leave `cosign.pub` unchanged.
+
 ### Building a different bootc image
 
 The **Run workflow** dialog contains a `bootc_image` field. Replace the default value with another public bootc image if required.
