@@ -257,22 +257,24 @@ jobs:
           [[ -n "${name}" && "${name}" != "null" ]]
           [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
 
-          ref="${name}@${digest}"
+          immutable_ref="${name}@${digest}"
+          tracking_ref="${BOOTC_IMAGE}"
 
           if [[ "${VERIFY_SIGNATURE}" == "true" ]]; then
             cosign verify \
               --new-bundle-format=false \
               --key cosign.pub \
-              "${ref}" >/tmp/bootc-image-verify.json
+              "${immutable_ref}" >/tmp/bootc-image-verify.json
             jq -e 'length > 0' /tmp/bootc-image-verify.json >/dev/null
-            echo "Verified installer payload: ${ref}"
+            echo "Verified installer payload: ${immutable_ref}"
           else
-            echo "WARNING: signature verification disabled for ${ref}"
+            echo "WARNING: signature verification disabled for ${immutable_ref}"
           fi
 
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
-          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+          echo "immutable_ref=${immutable_ref}" >> "${GITHUB_OUTPUT}"
+          echo "tracking_ref=${tracking_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Prepare rootful Podman storage
         shell: bash
@@ -297,19 +299,31 @@ jobs:
             --tag "${INSTALLER_IMAGE}" \
             .
 
-      - name: Pull payload and image builder
+      - name: Pull verified payload and image builder
         shell: bash
         env:
-          SOURCE_REF: ${{ steps.source.outputs.ref }}
+          IMMUTABLE_REF: ${{ steps.source.outputs.immutable_ref }}
+          TRACKING_REF: ${{ steps.source.outputs.tracking_ref }}
         run: |
           set -euo pipefail
-          sudo podman pull "${SOURCE_REF}"
+
+          # Pull only the exact digest that was resolved and verified above. Never
+          # re-pull the moving tag here; that would reintroduce a build-time race.
+          sudo podman pull "${IMMUTABLE_REF}"
+
+          # Give that exact local image the user's selected image name/tag. BIB uses
+          # this local name as the installed bootc tracking reference while still
+          # embedding the already verified immutable image content.
+          if [[ "${TRACKING_REF}" != "${IMMUTABLE_REF}" ]]; then
+            sudo podman tag "${IMMUTABLE_REF}" "${TRACKING_REF}"
+          fi
+
           sudo podman pull "${BIB_IMAGE}"
 
       - name: Build bootc installer ISO
         shell: bash
         env:
-          SOURCE_REF: ${{ steps.source.outputs.ref }}
+          TRACKING_REF: ${{ steps.source.outputs.tracking_ref }}
         run: |
           set -euo pipefail
           mkdir -p output
@@ -323,7 +337,7 @@ jobs:
             "${BIB_IMAGE}" build \
             --output /output \
             --type bootc-installer \
-            --installer-payload-ref "${SOURCE_REF}" \
+            --installer-payload-ref "${TRACKING_REF}" \
             "${INSTALLER_IMAGE}"
 
       - name: Prepare downloadable ISO
@@ -360,6 +374,7 @@ jobs:
         env:
           SOURCE_NAME: ${{ steps.source.outputs.name }}
           SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
+          TRACKING_REF: ${{ steps.source.outputs.tracking_ref }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
@@ -394,7 +409,8 @@ jobs:
             echo '> The artifact expires after 1 day. Run this workflow again if it has expired.'
             echo
             echo "- Source image: ${SOURCE_NAME}"
-            echo "- Resolved digest: ${SOURCE_DIGEST}"
+            echo "- Installed payload digest: ${SOURCE_DIGEST}"
+            echo "- Bootc update tracking reference: ${TRACKING_REF}"
             echo "- Signature verification: ${{ inputs.verify_signature }}"
             echo "- bbox password login: ${password_status}"
             echo "- SSH public key: ${ssh_status}"
