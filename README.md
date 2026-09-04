@@ -5,7 +5,7 @@ Build a personal, unattended UEFI installer ISO for [Alma Black Box](https://git
 This repository is intended to be used as a **GitHub template**. It is an ISO factory, not the Alma Black Box operating-system source. The installed operating system comes from the selected bootc container image.
 
 > [!IMPORTANT]
-> The default image is `ghcr.io/highwaytoit/alma-black-box:10`. The `:10` tag is resolved to its current amd64 digest every time you manually start a build. A repository created from this template months from now will therefore install the current image behind that tag, not the image that existed when the template was copied.
+> The default image is `ghcr.io/highwaytoit/alma-black-box:10`. The `:10` tag is resolved to its current amd64 digest every time you manually start a build. The ISO embeds that exact verified image content, while the installed system keeps `ghcr.io/highwaytoit/alma-black-box:10` as its bootc update tracking reference. A repository created from this template months from now will therefore install the current image behind that tag and continue following future `:10` updates after installation.
 
 ## Build your ISO
 
@@ -159,7 +159,14 @@ The default workflow input is:
 ghcr.io/highwaytoit/alma-black-box:10
 ```
 
-The workflow resolves that moving tag to an immutable digest at build time and uses that exact digest for the installer payload.
+The workflow resolves that moving tag to an immutable amd64 digest and verifies that exact digest before the ISO build begins. It then pulls only that immutable digest and gives the verified local image the original selected tag before handing it to `bootc-image-builder`.
+
+This deliberately separates two concerns:
+
+- **Installation payload:** exact immutable image content that was resolved and verified during the ISO build.
+- **Bootc update tracking reference:** the selected image reference, normally `ghcr.io/highwaytoit/alma-black-box:10`, which remains on the installed system so future `bootc update` runs can follow newly published `:10` images.
+
+The workflow Summary reports both the installed payload digest and the bootc update tracking reference.
 
 The default Alma Black Box image is verified with the included `cosign.pub` before the ISO is built.
 
@@ -177,6 +184,8 @@ The default Alma Black Box image is verified with the included `cosign.pub` befo
 ### Building a different bootc image
 
 The **Run workflow** dialog contains a `bootc_image` field. Replace the default value with another public bootc image if required.
+
+If you supply a tagged image reference, the exact resolved digest is embedded in the ISO while the installed system keeps the selected tag as its future update tracking reference. If you intentionally supply a digest-qualified image reference, the installed system will remain pinned to that digest.
 
 Signature verification is enabled by default. If the replacement image uses a different Cosign key, replace `cosign.pub` with the correct public key before building. If the replacement image is unsigned, the workflow also provides a `verify_signature` switch; disabling verification removes this supply-chain check and should be an intentional choice.
 
@@ -227,14 +236,14 @@ A manual build performs these steps:
 
 1. Validate the selected login and partition options and, when requested, the `SSH_PUBLIC_KEY` secret.
 2. Generate a temporary installer configuration with the selected password, SSH, and partition settings.
-3. Resolve the selected bootc image tag to its current amd64 digest.
+3. Resolve the selected bootc image reference to its current amd64 digest.
 4. Verify the exact digest with Cosign when signature verification is enabled.
 5. Build a disposable AlmaLinux installer container containing Anaconda, Lorax, GRUB and EFI tooling.
-6. Pull the verified bootc payload and `bootc-image-builder`.
-7. Build a `bootc-installer` ISO using the Kickstart from the temporary installer configuration.
+6. Pull the exact verified digest, locally assign it the selected tracking reference, and pull `bootc-image-builder`.
+7. Build a `bootc-installer` ISO using that verified local payload and the Kickstart from the temporary installer configuration.
 8. Create `alma-black-box-installer.iso` and `SHA256SUMS`.
 9. Upload them as a short-lived GitHub Actions artifact.
-10. Put the direct artifact download link and selected installer settings in the workflow Summary.
+10. Put the direct artifact download link, installed payload digest, bootc update tracking reference, and selected installer settings in the workflow Summary.
 
 The Anaconda/Lorax packages used to construct the ISO are **installer-only**. They are not added to the Alma Black Box production image being installed.
 
