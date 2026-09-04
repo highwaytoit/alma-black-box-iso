@@ -151,6 +151,45 @@ The workflow validates that all three partition sizes are positive whole numbers
 
 These controls are intentionally limited to the common layout. Advanced users who need a different filesystem, LVM, a separate `/var`, or another partition scheme can edit `installer/iso.toml` directly before running the workflow.
 
+## Default partition layout
+
+The partitioning and base account configuration live in:
+
+```text
+installer/iso.toml
+```
+
+The committed defaults are:
+
+| Mount point | Filesystem | Size |
+| --- | --- | --- |
+| `/boot/efi` | EFI System Partition | 512 MiB |
+| `/boot` | XFS | 1 GiB |
+| `/` | XFS | minimum 8 GiB, grows to use remaining disk space |
+| swap | none | not created |
+
+The disk is initialized as GPT.
+
+The workflow makes a temporary `installer/runtime-iso.toml` for each build and applies the selected password, SSH, and partition settings only to that runtime copy. It does not rewrite the committed `installer/iso.toml`.
+
+## DANGER: the installer is intentionally destructive
+
+> [!CAUTION]
+> **Disconnect every disk except the target installation disk before booting this ISO on physical hardware.**
+>
+> The supplied Kickstart uses `clearpart --all`. It is deliberately designed for a machine where the installer can see only the disk that should be erased. Do not rely on the installer to guess which of several attached disks contains data you want to keep.
+
+For a VM, create the VM with **one blank target disk**.
+
+For physical hardware, the safest procedure is:
+
+1. Power the machine off.
+2. Disconnect all non-target storage devices.
+3. Leave only the OS target disk connected.
+4. Boot the installer ISO and let the unattended installation finish.
+5. Boot the installed Alma Black Box system and verify it.
+6. Power down and reconnect any data disks afterward.
+
 ## Default installation image
 
 The default workflow input is:
@@ -190,45 +229,6 @@ If you supply a tagged image reference, the exact resolved digest is embedded in
 Signature verification is enabled by default. If the replacement image uses a different Cosign key, replace `cosign.pub` with the correct public key before building. If the replacement image is unsigned, the workflow also provides a `verify_signature` switch; disabling verification removes this supply-chain check and should be an intentional choice.
 
 The supplied installer environment is AlmaLinux 10 / x86_64 / UEFI oriented. A different distribution or architecture may require changes to `installer/Containerfile` and the workflow.
-
-## DANGER: the installer is intentionally destructive
-
-> [!CAUTION]
-> **Disconnect every disk except the target installation disk before booting this ISO on physical hardware.**
->
-> The supplied Kickstart uses `clearpart --all`. It is deliberately designed for a machine where the installer can see only the disk that should be erased. Do not rely on the installer to guess which of several attached disks contains data you want to keep.
-
-For a VM, create the VM with **one blank target disk**.
-
-For physical hardware, the safest procedure is:
-
-1. Power the machine off.
-2. Disconnect all non-target storage devices.
-3. Leave only the OS target disk connected.
-4. Boot the installer ISO and let the unattended installation finish.
-5. Boot the installed Alma Black Box system and verify it.
-6. Power down and reconnect any data disks afterward.
-
-## Default partition layout
-
-The partitioning and base account configuration live in:
-
-```text
-installer/iso.toml
-```
-
-The committed defaults are:
-
-| Mount point | Filesystem | Size |
-| --- | --- | --- |
-| `/boot/efi` | EFI System Partition | 512 MiB |
-| `/boot` | XFS | 1 GiB |
-| `/` | XFS | minimum 8 GiB, grows to use remaining disk space |
-| swap | none | not created |
-
-The disk is initialized as GPT.
-
-The workflow makes a temporary `installer/runtime-iso.toml` for each build and applies the selected password, SSH, and partition settings only to that runtime copy. It does not rewrite the committed `installer/iso.toml`.
 
 ## What the workflow does
 
