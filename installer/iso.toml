@@ -5,6 +5,12 @@ version = "1"
 # DANGER: this installer is intentionally destructive.
 # For physical hardware, disconnect every non-target disk before booting it.
 # For a VM, present one blank target disk.
+[customizations.installer.modules]
+enable = [
+  "org.fedoraproject.Anaconda.Modules.Localization",
+  "org.fedoraproject.Anaconda.Modules.Timezone",
+]
+
 [customizations.installer.kickstart]
 contents = """
 text --non-interactive
