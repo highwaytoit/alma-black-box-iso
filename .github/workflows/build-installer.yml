@@ -24,6 +24,16 @@ on:
         required: true
         default: false
         type: boolean
+      timezone:
+        description: IANA timezone, for example America/Toronto or Europe/Warsaw
+        required: true
+        default: America/Toronto
+        type: string
+      keyboard_layout:
+        description: Linux keyboard layout/keymap, for example us, ca, fr, de, or pl
+        required: true
+        default: us
+        type: string
       efi_size_mib:
         description: EFI partition size in MiB
         required: true
@@ -72,6 +82,8 @@ jobs:
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          TIMEZONE: ${{ inputs.timezone }}
+          KEYBOARD_LAYOUT: ${{ inputs.keyboard_layout }}
           EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
           BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
           ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
@@ -87,6 +99,16 @@ jobs:
           if [[ "${INSTALL_SSH_KEY}" == "true" && -z "${SSH_PUBLIC_KEY:-}" ]]; then
             echo 'ERROR: Install SSH public key is enabled, but repository secret SSH_PUBLIC_KEY is missing or empty.'
             echo 'Add the public key under Settings -> Secrets and variables -> Actions, then run the workflow again.'
+            exit 1
+          fi
+
+          if [[ ! "${TIMEZONE}" =~ ^UTC$|^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)+$ ]]; then
+            echo "ERROR: Timezone must be an IANA name such as America/Toronto, Europe/Warsaw, or UTC. Received: ${TIMEZONE}"
+            exit 1
+          fi
+
+          if [[ ! "${KEYBOARD_LAYOUT}" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+            echo "ERROR: Keyboard layout must be a Linux keymap name such as us, ca, fr, de, or pl. Received: ${KEYBOARD_LAYOUT}"
             exit 1
           fi
 
@@ -125,6 +147,8 @@ jobs:
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          TIMEZONE: ${{ inputs.timezone }}
+          KEYBOARD_LAYOUT: ${{ inputs.keyboard_layout }}
           EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
           BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
           ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
@@ -161,6 +185,8 @@ jobs:
           export RUNTIME_CONFIG="${runtime_config}"
           export NORMALIZED_SSH_PUBLIC_KEY="${normalized_key}"
           export DISABLED_PASSWORD_HASH="${disabled_password_hash}"
+          export TIMEZONE
+          export KEYBOARD_LAYOUT
 
           python3 <<'PY'
           import os
@@ -171,12 +197,16 @@ jobs:
           text = path.read_text()
 
           user_pattern = re.compile(r'^user --name=bbox --groups=wheel(?: .*)?$', re.MULTILINE)
+          keyboard_pattern = re.compile(r'^keyboard --vckeymap=\S+ --xlayouts=\S+$', re.MULTILINE)
+          timezone_pattern = re.compile(r'^timezone \S+ --utc$', re.MULTILINE)
           efi_pattern = re.compile(r'^part /boot/efi --fstype=efi --size=\d+$', re.MULTILINE)
           boot_pattern = re.compile(r'^part /boot --fstype=xfs --size=\d+$', re.MULTILINE)
           root_pattern = re.compile(r'^part / --fstype=xfs(?: --grow)? --size=\d+$', re.MULTILINE)
 
           checks = {
               "bbox user": user_pattern,
+              "keyboard": keyboard_pattern,
+              "timezone": timezone_pattern,
               "EFI partition": efi_pattern,
               "/boot partition": boot_pattern,
               "root partition": root_pattern,
@@ -209,6 +239,15 @@ jobs:
                   f'{user_line}\nsshkey --username=bbox "{key}"',
                   1,
               )
+
+          timezone = os.environ["TIMEZONE"]
+          keyboard_layout = os.environ["KEYBOARD_LAYOUT"]
+          text = timezone_pattern.sub(f"timezone {timezone} --utc", text, count=1)
+          text = keyboard_pattern.sub(
+              f"keyboard --vckeymap={keyboard_layout} --xlayouts={keyboard_layout}",
+              text,
+              count=1,
+          )
 
           efi_size = int(os.environ["EFI_SIZE_MIB"])
           boot_size = int(os.environ["BOOT_SIZE_MIB"])
@@ -299,6 +338,44 @@ jobs:
             --tag "${INSTALLER_IMAGE}" \
             .
 
+      - name: Validate timezone and keyboard against installer environment
+        shell: bash
+        env:
+          TIMEZONE: ${{ inputs.timezone }}
+          KEYBOARD_LAYOUT: ${{ inputs.keyboard_layout }}
+        run: |
+          set -euo pipefail
+
+          sudo podman run --rm \
+            --env "TIMEZONE=${TIMEZONE}" \
+            --env "KEYBOARD_LAYOUT=${KEYBOARD_LAYOUT}" \
+            --entrypoint /bin/bash \
+            "${INSTALLER_IMAGE}" \
+            -c '
+              set -euo pipefail
+
+              if [[ ! -f "/usr/share/zoneinfo/${TIMEZONE}" ]]; then
+                echo "ERROR: Unknown timezone in installer environment: ${TIMEZONE}" >&2
+                exit 1
+              fi
+
+              keymap_path="$(find /usr/lib/kbd/keymaps /usr/share/kbd/keymaps \
+                -type f \
+                \( -name "${KEYBOARD_LAYOUT}.map" \
+                   -o -name "${KEYBOARD_LAYOUT}.map.gz" \
+                   -o -name "${KEYBOARD_LAYOUT}.map.xz" \
+                   -o -name "${KEYBOARD_LAYOUT}.map.zst" \) \
+                -print -quit 2>/dev/null || true)"
+
+              if [[ -z "${keymap_path}" ]]; then
+                echo "ERROR: Unknown keyboard layout/keymap in installer environment: ${KEYBOARD_LAYOUT}" >&2
+                exit 1
+              fi
+
+              echo "Validated timezone: ${TIMEZONE}"
+              echo "Validated keyboard keymap: ${KEYBOARD_LAYOUT} (${keymap_path})"
+            '
+
       - name: Pull verified payload and image builder
         shell: bash
         env:
@@ -378,6 +455,8 @@ jobs:
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           ENABLE_PASSWORD_LOGIN: ${{ inputs.enable_password_login }}
           INSTALL_SSH_KEY: ${{ inputs.install_ssh_key }}
+          TIMEZONE: ${{ inputs.timezone }}
+          KEYBOARD_LAYOUT: ${{ inputs.keyboard_layout }}
           EFI_SIZE_MIB: ${{ inputs.efi_size_mib }}
           BOOT_SIZE_MIB: ${{ inputs.boot_size_mib }}
           ROOT_SIZE_MIB: ${{ inputs.root_size_mib }}
@@ -414,6 +493,9 @@ jobs:
             echo "- Signature verification: ${{ inputs.verify_signature }}"
             echo "- bbox password login: ${password_status}"
             echo "- SSH public key: ${ssh_status}"
+            echo "- Timezone: ${TIMEZONE}"
+            echo "- Keyboard layout/keymap: ${KEYBOARD_LAYOUT}"
+            echo '- Language: en_US.UTF-8'
             echo '- bbox groups: wheel'
             echo '- Root login: locked'
             echo '- Installer type: bootc-installer with embedded Anaconda/Lorax environment'
